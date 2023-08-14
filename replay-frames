@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+
+#------------------------------------------------------------------------------
+# Replay Frames from a PCAP File Interactively to a different destination.
+#
+# Usage:
+#   ./replay-frames <path-to-pcap-file>
+#               [--destination <destination-ip:port> (default: 127.0.0.1:8000)]
+#               [--tshark-decoder <decoder-definition>]
+#
+# Example:
+#   ./replay-frames input.pcap \
+#               --destination localhost:3000 \
+#               --tshark-decoder tcp.port==5656,hl7 \
+#               --tshark-decoder tcp.port==49913,hl7
+#
+# Note: It sends the payload of the frame with netcat.
+#
+# Dependencies:
+#   - tshark (CLI version of Wireshark)
+#   - netcat (nc)
+#
+# Metadata:
+#   Author: Cristián Arenas <cristian.arenas@gmail.com>
+#   Date: 2023-08-13
+#   Version: 1.0
+#   License: MIT
+#------------------------------------------------------------------------------
+
+DESTINATION="127.0.0.1:8000"
+DECODERS=()
+
+# Parsing the command-line arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+    --destination)
+        shift
+        DESTINATION="$1"
+        ;;
+    --tshark-decoder)
+        shift
+        DECODERS+=("-d $1")
+        ;;
+    *)
+        if [[ ! -f "$1" ]]; then
+            echo "Error: Invalid pcap file argument."
+            exit 1
+        fi
+        PCAP="$1"
+        ;;
+    esac
+    shift
+done
+
+# Check if the PCAP argument has been provided
+if [[ -z "$PCAP" ]]; then
+    echo "Error: A pcap file argument is required."
+    exit 1
+fi
+
+# Start REPL
+while true; do
+    # Analyze the PCAP file and display the available frames
+    echo "Available Frames:"
+    tshark -r "$PCAP" "${DECODERS[@]}"
+
+    # Prompt user for a frame number
+    echo -n "Enter frame number to replay (or press Enter to exit): "
+    read frame_num
+
+    # Exit if no input
+    if [[ -z "$frame_num" ]]; then
+        break
+    fi
+
+    # Extract specified frame
+    tshark -r "$PCAP" -w temp_1_frame.pcap -Y "frame.number==$frame_num"
+    echo "Selected frame saved as temp_1_frame.pcap"
+
+    # Originally, I was using tcprewrite and tcpreplay to modify and send it.
+    # But sending a single frame without the handshake was not useful to me.
+    # So I decided to use nc to send the payload directly.
+    # I'm leaving the original code here in case someone finds it useful.
+    #
+    ## # Use tcprewrite to modify the packet
+    ## tcprewrite \
+    ##     --dstipmap=192.168.88.9:127.0.0.1,192.168.88.13:127.0.0.1 \
+    ##     --portmap=49913:3000,5656:8000 \
+    ##     -i temp_1_frame.pcap \
+    ##     -o temp_2_rewritten.pcap
+    ## echo "Frame rewritten to send to 127.0.0.1 on lo0, saevd to temp_2_rewritten.pcap"
+    ##
+    ## # Replay the packet
+    ## echo "Replaying packet..."
+    ## tshark -r temp_3_combined.pcap -d tcp.port==5656,hl7 -d tcp.port==49913,hl7
+    ## tcpreplay -i lo0 temp_3_combined.pcap
+    ## echo "Done."
+
+    # Extract the payload from the frame
+    tshark -r temp_1_frame.pcap -T fields -e tcp.payload |
+        xxd -r -p >temp_2_payload.bin
+    echo "Raw payload saved as temp_2_payload.bin"
+
+    # Send the payload to the destination
+    IP=${DESTINATION%:*}
+    PORT=${DESTINATION#*:}
+    echo "Replaying selected frame (sending to $DESTINATION)..."
+    nc "$IP" "$PORT" <temp_2_payload.bin
+    echo "Done."
+
+    echo ""
+done
+
+# Cleanup temporary files
+rm temp_*.pcap
+echo "Temp files removed. Bye bye."
